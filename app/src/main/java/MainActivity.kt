@@ -3,7 +3,6 @@ package com.ste.editor
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
@@ -13,6 +12,7 @@ import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.content.Context
 import android.widget.Button
+import androidx.emoji2.widget.EmojiEditText
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -25,7 +25,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
 class MainActivity : Activity() {
-    private lateinit var editor: EditText
+    private lateinit var editor: EmojiEditText
     private lateinit var status: TextView
     private lateinit var fileLabel: TextView
     private var currentUri: Uri? = null
@@ -83,12 +83,11 @@ class MainActivity : Activity() {
         editTools.addView(toolButton("Clear") { editor.text.clear() }, buttonParams())
         page.addView(editTools)
 
-        editor = EditText(this).apply {
+        editor = EmojiEditText(this).apply {
             setTextColor(0xFFF2F2F2.toInt())
             setHintTextColor(0xFF888888.toInt())
             hint = "Write or open a text/code file..."
             textSize = 15f
-            typeface = Typeface.MONOSPACE
             gravity = Gravity.TOP or Gravity.START
             setPadding(dp(10), dp(10), dp(10), dp(10))
             setBackgroundColor(0xFF151515.toInt())

@@ -4,6 +4,11 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Canvas
+import android.view.View
+import android.text.Spannable
+import android.text.style.ForegroundColorSpan
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
@@ -26,13 +31,15 @@ import java.io.ByteArrayOutputStream
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
+import java.util.regex.Pattern
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private lateinit var editor: EmojiEditText
     private lateinit var status: TextView
     private lateinit var fileLabel: TextView
-    private lateinit var colorRow: LinearLayout
+    private lateinit var colorPicker: HueColorPicker
+    private var applyingSyntax = false
     private var currentUri: Uri? = null
     private var currentName = "Untitled"
     private var dirty = false
@@ -47,12 +54,6 @@ class MainActivity : Activity() {
         private const val OPEN_FILE = 1101
         private const val SAVE_FILE = 1102
         private var emojiInitialized = false
-        private val EDITOR_COLORS = intArrayOf(
-            0xFF151515.toInt(), 0xFF242424.toInt(), 0xFF172235.toInt(),
-            0xFF263238.toInt(), 0xFFF5F5F5.toInt(), 0xFFFFF3E0.toInt(),
-            0xFFE8F5E9.toInt(), 0xFFE3F2FD.toInt(), 0xFFFFF9C4.toInt(),
-            0xFFFCE4EC.toInt(), 0xFFEDE7F6.toInt()
-        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,22 +63,13 @@ class MainActivity : Activity() {
         initializeEmojiSupport()
         buildUi()
         updateStatus("Ready")
-        // Load the bundled emoji font after the first screen has been drawn.
-        editor.post {
-            try {
-                EmojiCompat.get().load()
-            } catch (_: IllegalStateException) {
-                toast("Emoji font could not be initialized")
-            }
-        }
+        editor.post { applySyntaxHighlighting() }
     }
 
     private fun initializeEmojiSupport() {
         if (emojiInitialized) return
-        val config = BundledEmojiCompatConfig(
-            applicationContext,
-            Executors.newSingleThreadExecutor()
-        ).setMetadataLoadStrategy(EmojiCompat.LOAD_STRATEGY_MANUAL)
+        val config = BundledEmojiCompatConfig(applicationContext, Executors.newSingleThreadExecutor())
+            .setReplaceAll(true)
         EmojiCompat.init(config)
         emojiInitialized = true
     }
@@ -95,56 +87,48 @@ class MainActivity : Activity() {
         }
         val title = TextView(this).apply {
             text = "STE"
-            textSize = 22f
+            textSize = 20f
             gravity = Gravity.CENTER_VERTICAL
             setTextColor(Color.WHITE)
-            setPadding(dp(7), 0, dp(7), 0)
+            setPadding(dp(5), 0, dp(5), 0)
         }
-        header.addView(title, LinearLayout.LayoutParams(0, dp(42), 1f))
-        header.addView(toolButton("Settings") { showSettingsDialog() }, LinearLayout.LayoutParams(-2, dp(40)))
+        header.addView(title, LinearLayout.LayoutParams(0, dp(32), 1f))
+        header.addView(toolButton("Settings") { showSettingsDialog() }, LinearLayout.LayoutParams(-2, dp(32)))
         page.addView(header)
 
         fileLabel = TextView(this).apply {
             text = currentName
-            textSize = 12f
+            textSize = 11f
             setTextColor(0xFFBDBDBD.toInt())
-            setPadding(dp(8), dp(3), dp(8), dp(5))
+            setPadding(dp(5), 0, dp(5), dp(2))
             maxLines = 1
         }
         page.addView(fileLabel)
 
+        // All editor commands share one compact row to maximize editing space.
         val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        tools.addView(toolButton("Open") { openFile() }, buttonParams())
-        tools.addView(toolButton("Save") { saveFile() }, buttonParams())
-        tools.addView(toolButton("Find") { showFindDialog(false) }, buttonParams())
-        tools.addView(toolButton("Replace") { showFindDialog(true) }, buttonParams())
+        listOf(
+            "Open" to { openFile() }, "Save" to { saveFile() },
+            "Find" to { showFindDialog(false) }, "Repl" to { showFindDialog(true) },
+            "Undo" to { toast("Undo is not available yet") },
+            "All" to { editor.selectAll() }, "Clear" to { editor.text.clear() }
+        ).forEach { (label, action) ->
+            tools.addView(toolButton(label, action), LinearLayout.LayoutParams(0, dp(34), 1f))
+        }
         page.addView(tools)
 
-        val editTools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        editTools.addView(toolButton("Undo") { toast("Undo is not available in this starter version") }, buttonParams())
-        editTools.addView(toolButton("Select all") { editor.selectAll() }, buttonParams())
-        editTools.addView(toolButton("Clear") { editor.text.clear() }, buttonParams())
-        page.addView(editTools)
-
         val colorLabel = TextView(this).apply {
-            text = "Editor background"
-            textSize = 11f
+            text = "Background color — drag to choose"
+            textSize = 10f
             setTextColor(0xFFBDBDBD.toInt())
-            setPadding(dp(7), dp(5), 0, 0)
+            setPadding(dp(5), dp(2), 0, 0)
         }
         page.addView(colorLabel)
-        val paletteScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            isFillViewport = false
+        colorPicker = HueColorPicker(this).apply {
+            setOnColorChanged { setEditorBackground(it) }
+            setColor(editorBackgroundColor)
         }
-        colorRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(3), dp(3), dp(3), dp(3))
-        }
-        paletteScroll.addView(colorRow)
-        page.addView(paletteScroll, LinearLayout.LayoutParams(-1, dp(48)))
-        rebuildColorPalette()
+        page.addView(colorPicker, LinearLayout.LayoutParams(-1, dp(24)))
 
         editor = EmojiEditText(this).apply {
             setTextColor(textColorFor(editorBackgroundColor))
@@ -164,7 +148,9 @@ class MainActivity : Activity() {
                     dirty = true
                     updateStatus("Modified")
                 }
-                override fun afterTextChanged(s: Editable?) {}
+                override fun afterTextChanged(s: Editable?) {
+                    if (!applyingSyntax) applySyntaxHighlighting()
+                }
             })
         }
 
@@ -182,25 +168,39 @@ class MainActivity : Activity() {
         page.addView(status)
         setContentView(page)
     }
-
-    private fun rebuildColorPalette() {
-        if (!::colorRow.isInitialized) return
-        colorRow.removeAllViews()
-        EDITOR_COLORS.forEach { color ->
-            val selected = color == editorBackgroundColor
-            val swatch = TextView(this).apply {
-                contentDescription = "Background color ${String.format("#%06X", 0xFFFFFF and color)}"
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(color)
-                    setStroke(dp(if (selected) 3 else 1), if (selected) 0xFFFFC107.toInt() else 0xFF777777.toInt())
-                }
-                setOnClickListener { setEditorBackground(color) }
+        private fun applySyntaxHighlighting() {
+        if (!::editor.isInitialized || applyingSyntax) return
+        val editable = editor.text ?: return
+        applyingSyntax = true
+        try {
+            editable.getSpans(0, editable.length, ForegroundColorSpan::class.java).forEach {
+                editable.removeSpan(it)
             }
-            colorRow.addView(swatch, LinearLayout.LayoutParams(dp(34), dp(34)).apply {
-                marginStart = dp(4)
-                marginEnd = dp(4)
-            })
+            val source = editable.toString()
+            fun paint(pattern: String, color: Int, flags: Int = Pattern.MULTILINE) {
+                val matcher = Pattern.compile(pattern, flags).matcher(source)
+                while (matcher.find()) {
+                    editable.setSpan(ForegroundColorSpan(color), matcher.start(), matcher.end(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
+            val ext = currentName.substringAfterLast('.', "").lowercase()
+            val codeFile = ext in setOf("kt", "java", "js", "html", "htm", "css", "json", "xml", "py", "sh", "gradle", "kts", "yaml", "yml", "toml")
+            if (!codeFile) return
+            val base = textColorFor(editorBackgroundColor)
+            val comment = if ((Color.red(editorBackgroundColor) * 299 + Color.green(editorBackgroundColor) * 587 + Color.blue(editorBackgroundColor) * 114) / 1000 < 115) 0xFF80A080.toInt() else 0xFF39733F.toInt()
+            val string = if ((Color.red(editorBackgroundColor) * 299 + Color.green(editorBackgroundColor) * 587 + Color.blue(editorBackgroundColor) * 114) / 1000 < 115) 0xFFFFC078.toInt() else 0xFF9A4B00.toInt()
+            val keyword = if ((Color.red(editorBackgroundColor) * 299 + Color.green(editorBackgroundColor) * 587 + Color.blue(editorBackgroundColor) * 114) / 1000 < 115) 0xFF80BFFF.toInt() else 0xFF174EA6.toInt()
+            val number = if ((Color.red(editorBackgroundColor) * 299 + Color.green(editorBackgroundColor) * 587 + Color.blue(editorBackgroundColor) * 114) / 1000 < 115) 0xFFD7A6FF.toInt() else 0xFF7B2CBF.toInt()
+            val tag = if ((Color.red(editorBackgroundColor) * 299 + Color.green(editorBackgroundColor) * 587 + Color.blue(editorBackgroundColor) * 114) / 1000 < 115) 0xFFFF8FA3.toInt() else 0xFFB00040.toInt()
+            // Set readable base color, then overlay token-specific colors.
+            if (source.isNotEmpty()) editable.setSpan(ForegroundColorSpan(base), 0, source.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            paint("(?s)/\\*.*?\\*/|//[^\\n]*|#[^\\n]*", comment)
+            paint("\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|`[^`]*`", string)
+            paint("\\b(class|fun|val|var|if|else|when|for|while|return|import|package|public|private|protected|static|final|new|this|null|true|false|const|let|function|def|from|as|try|catch|throw|async|await|extends|implements)\\b", keyword, Pattern.MULTILINE or Pattern.CASE_INSENSITIVE)
+            paint("\\b[0-9]+(?:\\.[0-9]+)?\\b", number)
+            paint("</?[A-Za-z][^>]*>|\\b[A-Za-z_-]+(?=\\s*=)", tag)
+        } finally {
+            applyingSyntax = false
         }
     }
 
@@ -211,7 +211,8 @@ class MainActivity : Activity() {
             editor.setTextColor(textColorFor(color))
         }
         preferences.edit().putInt("editor_background", color).apply()
-        rebuildColorPalette()
+        if (::colorPicker.isInitialized) colorPicker.setColor(color)
+        applySyntaxHighlighting()
     }
 
     private fun textColorFor(background: Int): Int {
@@ -267,17 +268,15 @@ class MainActivity : Activity() {
         Button(this).apply {
             text = label
             isAllCaps = false
-            textSize = 11f
-            minHeight = dp(42)
-            setPadding(dp(2), 0, dp(2), 0)
+            textSize = 9f
+            minHeight = dp(30)
+            minimumHeight = dp(30)
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(0, 0, 0, 0)
             setOnClickListener { action() }
         }
-
-    private fun buttonParams() = LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-        marginEnd = dp(2)
-    }
-
-    private fun openFile() {
+            private fun openFile() {
         if (dirty) {
             AlertDialog.Builder(this)
                 .setMessage("There are unsaved changes. Open another file?")
@@ -342,6 +341,7 @@ class MainActivity : Activity() {
 
         editor.setText(text)
         editor.setSelection(0)
+        applySyntaxHighlighting()
         currentUri = uri
         currentName = queryDisplayName(uri) ?: "Opened file"
         fileLabel.text = currentName
@@ -396,9 +396,10 @@ class MainActivity : Activity() {
                         val source = editor.text.toString()
                         val count = Regex(Regex.escape(query)).findAll(source).count()
                         editor.setText(source.replace(query, replacement))
+                        applySyntaxHighlighting()
                         updateStatus("$count replacements")
                     } else findNext(query)
-                       }
+                }
             }
             .show()
     }
@@ -440,4 +441,48 @@ class MainActivity : Activity() {
                 .show()
         } else super.onBackPressed()
     }
-}             
+
+    /** One continuous full-spectrum color strip; tap or drag to choose any hue. */
+    private inner class HueColorPicker(context: android.content.Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var selectedColor = editorBackgroundColor
+        private var listener: ((Int) -> Unit)? = null
+        private val colors = intArrayOf(
+            Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE,
+            Color.MAGENTA, Color.RED
+        )
+        fun setOnColorChanged(callback: (Int) -> Unit) { listener = callback }
+        fun setColor(color: Int) { selectedColor = color; invalidate() }
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val shader = android.graphics.LinearGradient(0f, 0f, width.toFloat(), 0f, colors, null, android.graphics.Shader.TileMode.CLAMP)
+            paint.shader = shader
+            val radius = height / 2f
+            canvas.drawRoundRect(0f, 1f, width.toFloat(), height - 1f, radius, radius, paint)
+            paint.shader = null
+            val x = (Color.red(selectedColor) + Color.green(selectedColor) + Color.blue(selectedColor)).let {
+                // Marker position follows hue, including gray colors at the center.
+                val hsv = FloatArray(3)
+                Color.colorToHSV(selectedColor, hsv)
+                hsv[0] / 360f * width
+            }.coerceIn(radius, width - radius)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(2).toFloat()
+            paint.color = Color.WHITE
+            canvas.drawCircle(x, height / 2f, radius - dp(2), paint)
+            paint.style = Paint.Style.FILL
+        }
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            if (event.action == android.view.MotionEvent.ACTION_DOWN || event.action == android.view.MotionEvent.ACTION_MOVE || event.action == android.view.MotionEvent.ACTION_UP) {
+                val hue = (event.x / width.coerceAtLeast(1) * 360f).coerceIn(0f, 359.9f)
+                val hsv = floatArrayOf(hue, 1f, 1f)
+                selectedColor = Color.HSVToColor(hsv)
+                listener?.invoke(selectedColor)
+                invalidate()
+                return true
+            }
+            return true
+        }
+    }
+
+}

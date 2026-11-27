@@ -7,8 +7,14 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
+import android.text.Spannable
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
@@ -32,6 +38,8 @@ import androidx.emoji2.widget.EmojiEditText
 import java.io.ByteArrayOutputStream
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
@@ -51,6 +59,17 @@ class MainActivity : Activity() {
     private var searchFrom = 0
     private var editorTextSize = 16f
     private var editorBackgroundColor = 0xFF151515.toInt()
+    private val rangeHandler = Handler(Looper.getMainLooper())
+    private var rangeCopyRunnable: Runnable? = null
+    private var applyingSyntax = false
+    private val syntaxColors = mapOf(
+        "keyword" to 0xFF569CD6.toInt(),
+        "string" to 0xFFCE9178.toInt(),
+        "number" to 0xFFB5CEA8.toInt(),
+        "comment" to 0xFF6A9955.toInt(),
+        "tag" to 0xFF4EC9B0.toInt(),
+        "attribute" to 0xFF9CDCFE.toInt()
+    )
 
     private val preferences by lazy { getSharedPreferences("ste_preferences", MODE_PRIVATE) }
 
@@ -68,13 +87,14 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        editorTextSize = preferences.getFloat("editor_text_size", 16f).coerceIn(10f, 36f)
+        editorTextSize = preferences.getFloat("editor_text_size", 16f).coerceIn(6f, 36f)
         editorBackgroundColor = preferences.getInt("editor_background", 0xFF151515.toInt())
         wordWrap = preferences.getBoolean("word_wrap", true)
         showLineNumbers = preferences.getBoolean("line_numbers", false)
         textEncoding = preferences.getString("encoding", "UTF-8") ?: "UTF-8"
         initializeEmojiSupport()
         buildUi()
+        handleIncomingIntent(intent)
         updateStatus("Ready")
         // Load the bundled emoji font after the first screen has been drawn.
         editor.post {
@@ -84,6 +104,12 @@ class MainActivity : Activity() {
                 toast("Emoji font could not be initialized")
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
     }
 
     private fun initializeEmojiSupport() {
@@ -115,7 +141,7 @@ class MainActivity : Activity() {
             setPadding(dp(7), 0, dp(7), 0)
         }
         header.addView(title, LinearLayout.LayoutParams(0, dp(42), 1f))
-        header.addView(toolButton("SETUP") { showSettingsDialog() }, LinearLayout.LayoutParams(dp(112), dp(56)))
+        header.addView(toolButton("SETUP") { showSettingsDialog() }, LinearLayout.LayoutParams(dp(112), dp(44)))
         page.addView(header)
 
         fileLabel = TextView(this).apply {
@@ -127,24 +153,37 @@ class MainActivity : Activity() {
         }
         page.addView(fileLabel)
 
-        // Fixed line-range copy controls remain visible above the editor.
+        // Enter both line numbers; the range is selected and copied automatically.
         val rangeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val rangeStart = EditText(this).apply { hint = "From line"; inputType = android.text.InputType.TYPE_CLASS_NUMBER; textSize = 12f; setSingleLine(true) }
         val rangeEnd = EditText(this).apply { hint = "To line"; inputType = android.text.InputType.TYPE_CLASS_NUMBER; textSize = 12f; setSingleLine(true) }
         rangeRow.addView(rangeStart, LinearLayout.LayoutParams(0, dp(42), 1f))
         rangeRow.addView(rangeEnd, LinearLayout.LayoutParams(0, dp(42), 1f))
-        rangeRow.addView(toolButton("Copy range") {
-            val first = rangeStart.text.toString().toIntOrNull()
-            val last = rangeEnd.text.toString().toIntOrNull()
-            copyLineRange(first, last)
-        }, LinearLayout.LayoutParams(dp(112), dp(48)))
         page.addView(rangeRow)
+        val scheduleRangeCopy = {
+            rangeCopyRunnable?.let { rangeHandler.removeCallbacks(it) }
+            val task = Runnable {
+                val first = rangeStart.text.toString().toIntOrNull()
+                val last = rangeEnd.text.toString().toIntOrNull()
+                if (first != null && last != null) copyLineRange(first, last)
+            }
+            rangeCopyRunnable = task
+            rangeHandler.postDelayed(task, 1000L)
+        }
+        val rangeWatcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { scheduleRangeCopy() }
+            override fun afterTextChanged(s: Editable?) {}
+        }
+        rangeStart.addTextChangedListener(rangeWatcher)
+        rangeEnd.addTextChangedListener(rangeWatcher)
 
         val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         tools.addView(toolButton("Open") { openFile() }, buttonParams())
         tools.addView(toolButton("Save") { saveFile() }, buttonParams())
         tools.addView(toolButton("Find") { showFindDialog(false) }, buttonParams())
         tools.addView(toolButton("Replace") { showFindDialog(true) }, buttonParams())
+        tools.addView(toolButton("Share") { shareDocument() }, buttonParams())
         page.addView(tools)
 
         val editTools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -172,22 +211,25 @@ class MainActivity : Activity() {
                     updateStatus("Modified")
                     if (::lineNumberView.isInitialized) lineNumberView.invalidate()
                 }
-                override fun afterTextChanged(s: Editable?) {}
+                override fun afterTextChanged(s: Editable?) {
+                    if (!applyingSyntax && s != null) applySyntaxHighlighting(s)
+                    if (::lineNumberView.isInitialized) lineNumberView.invalidate()
+                }
             })
         }
 
         lineNumberView = LineNumberView().apply { visibility = if (showLineNumbers) View.VISIBLE else View.GONE }
         val editorContent = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(lineNumberView, LinearLayout.LayoutParams(dp(42), -1))
+            addView(lineNumberView, LinearLayout.LayoutParams(dp(48), -1))
             addView(editor, LinearLayout.LayoutParams(-1, -2, 1f))
         }
         val editorScroll = ScrollView(this).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
             addView(editorContent, FrameLayout.LayoutParams(-1, -2))
-            setOnScrollChangeListener { _, _, scrollY, _, _ ->
-                lineNumberView.scrollTo(0, scrollY)
+            setOnScrollChangeListener { _, _, _, _, _ ->
+                lineNumberView.invalidate()
                 if (::scrollHandle.isInitialized) scrollHandle.invalidate()
             }
         }
@@ -195,7 +237,7 @@ class MainActivity : Activity() {
         scrollHandle = ScrollHandleView().apply { bind(editorScroll) }
         val editorFrame = FrameLayout(this).apply {
             addView(editorScroll, FrameLayout.LayoutParams(-1, -1))
-            addView(scrollHandle, FrameLayout.LayoutParams(dp(30), -1, Gravity.END or Gravity.TOP))
+            addView(scrollHandle, FrameLayout.LayoutParams(dp(60), -1, Gravity.END or Gravity.TOP))
         }
         page.addView(editorFrame, LinearLayout.LayoutParams(-1, 0, 1f))
 
@@ -240,10 +282,10 @@ class MainActivity : Activity() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(8), dp(18), 0) }
         val sizeLabel = TextView(this).apply { text = "Text size: ${editorTextSize.roundToInt()} sp"; textSize = 16f; gravity = Gravity.CENTER }
         box.addView(sizeLabel, LinearLayout.LayoutParams(-1, dp(38)))
-        val sizeBar = SeekBar(this).apply { max = 42; progress = editorTextSize.roundToInt() - 10 }
+        val sizeBar = SeekBar(this).apply { max = 30; progress = editorTextSize.roundToInt() - 6 }
         box.addView(sizeBar, LinearLayout.LayoutParams(-1, dp(48)))
         sizeBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { editorTextSize = (progress + 10).toFloat(); sizeLabel.text = "Text size: ${editorTextSize.roundToInt()} sp"; editor.textSize = editorTextSize; if (::lineNumberView.isInitialized) lineNumberView.invalidate() }
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) { editorTextSize = (progress + 6).toFloat(); sizeLabel.text = "Text size: ${editorTextSize.roundToInt()} sp"; editor.textSize = editorTextSize; if (::lineNumberView.isInitialized) lineNumberView.invalidate() }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
@@ -274,13 +316,13 @@ class MainActivity : Activity() {
             text = label
             isAllCaps = false
             textSize = 11f
-            minHeight = dp(88)
-            minimumHeight = dp(88)
+            minHeight = dp(44)
+            minimumHeight = dp(44)
             setPadding(dp(2), 0, dp(2), 0)
             setOnClickListener { action() }
         }
 
-    private fun buttonParams() = LinearLayout.LayoutParams(0, dp(88), 1f).apply {
+    private fun buttonParams() = LinearLayout.LayoutParams(0, dp(44), 1f).apply {
         marginEnd = dp(2)
     }
 
@@ -342,11 +384,12 @@ class MainActivity : Activity() {
             out.toByteArray()
         } ?: throw IllegalStateException("Cannot read file")
 
-        val charset = java.nio.charset.Charset.forName(textEncoding)
+        val (charset, offset) = detectCharset(bytes)
+        textEncoding = charset.name()
         val decoder = charset.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-        val text = decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+            .onMalformedInput(CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(CodingErrorAction.REPLACE)
+        val text = decoder.decode(ByteBuffer.wrap(bytes, offset, bytes.size - offset)).toString()
 
         editor.setText(text)
         editor.setSelection(0)
@@ -354,7 +397,7 @@ class MainActivity : Activity() {
         currentName = queryDisplayName(uri) ?: "Opened file"
         fileLabel.text = currentName
         dirty = false
-        updateStatus("Opened $textEncoding | ${lineCount()} lines")
+        updateStatus("Opened ${charset.name()} | ${lineCount()} lines")
     }
 
     private fun writeDocument(uri: Uri) {
@@ -410,6 +453,7 @@ class MainActivity : Activity() {
             }
             .show()
     }
+    
 
     private fun findNext(query: String) {
         val content = editor.text.toString()
@@ -425,6 +469,84 @@ class MainActivity : Activity() {
         } else {
             searchFrom = 0
             toast("Not found")
+        }
+    }
+
+    private fun detectCharset(bytes: ByteArray): Pair<Charset, Int> {
+        fun starts(vararg values: Int) = bytes.size >= values.size &&
+            values.indices.all { (bytes[it].toInt() and 0xFF) == values[it] }
+        return when {
+            starts(0x00, 0x00, 0xFE, 0xFF) -> Charset.forName("UTF-32BE") to 4
+            starts(0xFF, 0xFE, 0x00, 0x00) -> Charset.forName("UTF-32LE") to 4
+            starts(0xEF, 0xBB, 0xBF) -> StandardCharsets.UTF_8 to 3
+            starts(0xFE, 0xFF) -> StandardCharsets.UTF_16BE to 2
+            starts(0xFF, 0xFE) -> StandardCharsets.UTF_16LE to 2
+            else -> Charset.forName(textEncoding) to 0
+        }
+    }
+
+    private fun handleIncomingIntent(incoming: Intent?) {
+        if (incoming == null) return
+        val uri = when (incoming.action) {
+            Intent.ACTION_VIEW -> incoming.data
+            Intent.ACTION_SEND -> {
+                @Suppress("DEPRECATION")
+                (incoming.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri) ?: incoming.data
+            }
+            else -> null
+        }
+        if (uri != null) {
+            try {
+                readDocument(uri)
+                try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
+            } catch (e: Exception) {
+                toast("Cannot open file: ${e.message ?: "unknown error"}")
+            }
+        } else if (incoming.action == Intent.ACTION_SEND) {
+            val sharedText = incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            if (!sharedText.isNullOrEmpty()) {
+                editor.setText(sharedText)
+                currentName = "Shared text"
+                fileLabel.text = currentName
+                dirty = false
+            }
+        }
+    }
+
+    private fun shareDocument() {
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, editor.text.toString())
+            putExtra(Intent.EXTRA_SUBJECT, currentName)
+            currentUri?.let {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                putExtra(Intent.EXTRA_STREAM, it)
+            }
+        }
+        startActivity(Intent.createChooser(send, "Share text"))
+    }
+
+    private fun applySyntaxHighlighting(editable: Editable) {
+        applyingSyntax = true
+        try {
+            val length = editable.length
+            editable.getSpans(0, length, ForegroundColorSpan::class.java).forEach {
+                editable.removeSpan(it)
+            }
+            val text = editable.toString()
+            fun color(pattern: Regex, value: Int) {
+                pattern.findAll(text).forEach { match ->
+                    editable.setSpan(ForegroundColorSpan(value), match.range.first, match.range.last + 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
+            color(Regex("""\b\d+(?:\.\d+)?\b"""), syntaxColors.getValue("number"))
+            color(Regex("""</?[A-Za-z][A-Za-z0-9:-]*|/?>"""), syntaxColors.getValue("tag"))
+            color(Regex("""\b(?:class|fun|val|var|if|else|when|for|while|return|import|package|public|private|protected|static|void|int|long|float|double|boolean|new|this|null|true|false|const|let|function|async|await|def|from|as|try|catch|throw|extends|implements|interface|object|override|data|enum|suspend)\b"""), syntaxColors.getValue("keyword"))
+            color(Regex("""\b[A-Za-z_:][-A-Za-z0-9_:]*(?=\s*=)"""), syntaxColors.getValue("attribute"))
+            color(Regex("""(?s)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`])*`)"""), syntaxColors.getValue("string"))
+            color(Regex("""(?s)/\*.*?\*/|<!--.*?-->|(?m)//.*$|(?m)^\s*#.*$"""), syntaxColors.getValue("comment"))
+        } finally {
+            applyingSyntax = false
         }
     }
 
@@ -446,11 +568,9 @@ class MainActivity : Activity() {
             super.onDraw(canvas)
             if (!::editor.isInitialized) return
             val layout = editor.layout ?: return
-            val firstVisible = layout.getLineForVertical(editor.scrollY)
-            val lastVisible = layout.getLineForVertical(editor.scrollY + editor.height)
-            for (line in firstVisible..lastVisible.coerceAtMost(layout.lineCount - 1)) {
-                val y = layout.getLineBaseline(line) - scrollY
-                canvas.drawText((line + 1).toString(), dp(4).toFloat(), y.toFloat(), paint)
+            for (line in 0 until layout.lineCount) {
+                val y = layout.getLineBaseline(line).toFloat()
+                canvas.drawText((line + 1).toString(), dp(4).toFloat(), y, paint)
             }
         }
     }
@@ -491,9 +611,9 @@ class MainActivity : Activity() {
             val range = (sv.getChildAt(0)?.height ?: 0) - sv.height
             if (range <= 0) return
             updateThumb()
-            val centerX = width - inset
-            canvas.drawRoundRect(centerX - dp(5), 0f, centerX + dp(1), height.toFloat(), dp(5).toFloat(), dp(5).toFloat(), trackPaint)
-            canvas.drawRoundRect(centerX - dp(7), thumbTop, centerX + dp(3), thumbTop + thumbHeight, dp(6).toFloat(), dp(6).toFloat(), thumbPaint)
+            val centerX = width / 2f
+            canvas.drawRoundRect(centerX - dp(8), 0f, centerX + dp(8), height.toFloat(), dp(8).toFloat(), dp(8).toFloat(), trackPaint)
+            canvas.drawRoundRect(centerX - dp(12), thumbTop, centerX + dp(12), thumbTop + thumbHeight, dp(9).toFloat(), dp(9).toFloat(), thumbPaint)
         }
 
         private fun scrollToTouch(y: Float) {

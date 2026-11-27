@@ -435,9 +435,8 @@ class MainActivity : Activity() {
         val start = lines.take(first - 1).sumOf { it.length + 1 }
         val end = start + lines.subList(first - 1, last).sumOf { it.length } + (last - first)
         editor.requestFocus(); editor.setSelection(start.coerceAtMost(editor.length()), end.coerceAtMost(editor.length()))
-        
         val clip = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        clip.setPrimaryClip(android.content.ClipData.newPlainText("STE lines $first-$last", edit.text.subSequence(start, end)))
+         clip.setPrimaryClip(android.content.ClipData.newPlainText("STE lines $first-$last", editor.text.subSequence(start, end)))
         toast("Lines $first-$last copied")
     }
 

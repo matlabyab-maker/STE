@@ -2,16 +2,14 @@
 
 Lightweight native Android text and source-code editor.
 
-## Emoji rendering
-
-The editor uses AndroidX Emoji2 with the bundled Noto Color Emoji font and explicitly initializes `EmojiCompat` before creating the editable field. This avoids depending on a device-installed downloadable emoji font provider. The bundled font increases APK size (the upstream font is over 10 MB). Actual display should still be verified on the target device, especially for newest emoji sequences.
+## Emoji support
+Uses AndroidX Emoji2 with the bundled emoji font and replace-all processing. Rendering of combined emoji sequences must be verified on the target Android device; text is saved as its original UTF-8 characters and syntax highlighting adds visual spans only.
 
 ## Editor appearance
-
-- Horizontal editor-background color palette.
+- Continuous full-spectrum HSV color strip; tap or drag to select a background color.
+- Compact single-row editor toolbar.
 - Text size setting from 10 sp to 36 sp, saved between launches.
-- Background color and text contrast are saved between launches.
+- Basic syntax coloring for common source-code tokens.
 
 ## Build
-
 Android Gradle Plugin 8.7.3, Kotlin 2.0.21, Gradle 8.9, Java 17, compileSdk 35, minSdk 23.

@@ -23,3 +23,8 @@ android {
         jvmTarget = "17"
     }
 }
+
+dependencies {
+    implementation("androidx.emoji2:emoji2:1.6.0")
+    implementation("androidx.emoji2:emoji2-views:1.6.0")
+}
